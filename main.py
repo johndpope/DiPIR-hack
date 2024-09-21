@@ -174,10 +174,13 @@ def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=10
     config = LoraConfig(
         r=4,
         lora_alpha=32,
-        target_modules=["q_proj", "v_proj"],
+        target_modules=["to_q", "to_k", "to_v", "to_out"],
         lora_dropout=0.05,
         bias="none",
     )
+    for name, module in pipe.unet.named_modules():
+        if any(x in name for x in ["to_q", "to_k", "to_v", "to_out"]):
+            print(name)
     pipe.unet = get_peft_model(pipe.unet, config)
     
     # Freeze text encoder and VAE
