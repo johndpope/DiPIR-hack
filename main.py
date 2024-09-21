@@ -17,6 +17,8 @@ from pytorch3d.renderer import (
     Materials, BlendParams
 )
 from pytorch3d.structures import Meshes
+from pytorch3d.structures import join_meshes_as_scene
+
 
 # Diffusers library for Stable Diffusion
 from diffusers import StableDiffusionPipeline,DDPMScheduler
@@ -72,7 +74,7 @@ def create_plane(size=5.0, device='cpu'):
 plane_mesh = create_plane(size=5.0, device=device)
 
 # Combine the object mesh and the plane mesh into a scene
-scene_mesh = virtual_object_mesh.extend(1) + plane_mesh
+scene_mesh = join_meshes_as_scene([virtual_object_mesh, plane_mesh])
 
 # --------------------------
 # Step 4: Define Optimizable Environment Lighting
