@@ -72,11 +72,13 @@ def create_plane(size=5.0, device='cpu'):
 # Create the plane
 plane_mesh = create_plane(size=5.0, device=device)
 
+
 # Ensure both meshes have vertex textures
-if isinstance(virtual_object_mesh.textures, TexturesUV):
-    # Convert UV textures to vertex textures
-    vertex_colors = virtual_object_mesh.sample_textures(virtual_object_mesh.verts_packed())
-    virtual_object_mesh.textures = TexturesVertex(verts_features=vertex_colors[None])
+if not isinstance(virtual_object_mesh.textures, TexturesVertex):
+    # Assign default white vertex colors
+    num_verts = virtual_object_mesh.num_verts_per_mesh().item()
+    verts_features = torch.ones((1, num_verts, 3), device=device)
+    virtual_object_mesh.textures = TexturesVertex(verts_features=verts_features)
 
 # Combine the meshes
 scene_mesh = join_meshes_as_scene([virtual_object_mesh, plane_mesh])
