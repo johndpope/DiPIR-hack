@@ -29,7 +29,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # Step 1: Load Background Image
 # --------------------------
 # Load the background image
-background_image = Image.open('background.jpg').convert('RGB')
+background_image = Image.open('multi_bg.jpg').convert('RGB')
 bg_transform = T.Compose([
     T.Resize((512, 512)),
     T.ToTensor(),
