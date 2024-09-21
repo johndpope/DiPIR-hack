@@ -192,7 +192,7 @@ def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=10
     
     # Create corresponding prompts
     target_prompt = "a scene in the style of sks rendering"
-    concept_prompts = ["a photo of a car"] * len(concept_images)
+    concept_prompts = ["a photo of a white delorean time travel car"] * len(concept_images)
     all_prompts = [target_prompt] + concept_prompts
     
     # Prepare optimizer
