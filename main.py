@@ -7,6 +7,7 @@ from PIL import Image
 import numpy as np
 from peft import LoraConfig, get_peft_model
 import random
+from pytorch3d.renderer import TexturesVertex
 
 
 # PyTorch3D for differentiable rendering
@@ -49,7 +50,6 @@ virtual_object_mesh = load_objs_as_meshes(['virtual_object.obj'], device=device)
 # Step 3: Define Proxy Geometry (Plane)
 # --------------------------
 def create_plane(size=5.0, device='cpu'):
-    # Create a simple square plane in the XZ plane
     verts = torch.tensor([
         [-size, 0, -size],
         [size, 0, -size],
@@ -62,20 +62,24 @@ def create_plane(size=5.0, device='cpu'):
         [0, 2, 3],
     ], device=device, dtype=torch.int64)
 
-    textures = TexturesUV(
-        maps=torch.ones((1, 1, 1, 3), device=device),
-        faces_uvs=faces.unsqueeze(0),
-        verts_uvs=torch.zeros_like(verts[:, :2]).unsqueeze(0),
-    )
+    # Create a simple texture for the plane
+    verts_rgb = torch.ones_like(verts)[None]  # (1, V, 3)
+    textures = TexturesVertex(verts_features=verts_rgb)
 
     plane_mesh = Meshes(verts=[verts], faces=[faces], textures=textures)
     return plane_mesh
 
+# Create the plane
 plane_mesh = create_plane(size=5.0, device=device)
 
-# Combine the object mesh and the plane mesh into a scene
-scene_mesh = join_meshes_as_scene([virtual_object_mesh, plane_mesh])
+# Ensure both meshes have vertex textures
+if isinstance(virtual_object_mesh.textures, TexturesUV):
+    # Convert UV textures to vertex textures
+    vertex_colors = virtual_object_mesh.sample_textures(virtual_object_mesh.verts_packed())
+    virtual_object_mesh.textures = TexturesVertex(verts_features=vertex_colors[None])
 
+# Combine the meshes
+scene_mesh = join_meshes_as_scene([virtual_object_mesh, plane_mesh])
 # --------------------------
 # Step 4: Define Optimizable Environment Lighting
 # --------------------------
