@@ -12,8 +12,7 @@ import bpy
 import trimesh
 import os
 from diffusers import UNet2DConditionModel
-
-
+from lora_utils import inject_trainable_LoRA, fuse_LoRA_into_linear, unfreeze_all_LoRA_layers, ATTENTION_MODULES
 
 # PyTorch3D for differentiable rendering
 from pytorch3d.io import load_objs_as_meshes
@@ -33,7 +32,7 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 import fnmatch
 from diffusers.models.attention_processor import LoRAAttnProcessor
 from diffusers.loaders import AttnProcsLayers
-from lora import inject_trainable_lora
+# from lora_utils import inject_trainable_lora
 
 
 
@@ -247,30 +246,27 @@ pipe.enable_attention_slicing()  # For memory efficiency
 
 # Implement LoRA for personalization
 # Here we use a simplified version; in practice, use a LoRA library or implementation
-from diffusers import UNet2DConditionModel
-from diffusers.models.attention_processor import LoRAAttnProcessor
-import itertools
-
 
 
 def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=1000):
-    # Set up LoRA for UNet
-    lora_unet_target_modules = {"CrossAttention", "Attention", "GEGLU"}
-    require_grad_params, names = inject_trainable_lora(
+    # Inject LoRA into the UNet
+    inject_trainable_LoRA(
         model=pipe.unet,
-        target_replace_module=lora_unet_target_modules,
-        r=4,  # LoRA rank
-        loras=None,  # Path to existing LoRA weights if any
-        dropout_p=0.1,
+        rank=4,
+        scale=1.0,
+        target_replace_modules=ATTENTION_MODULES
     )
-    lora_params_to_optimize = [{"params": itertools.chain(*require_grad_params)}]
-
-    pipe.unet.train()
-    pipe.text_encoder.requires_grad_(False)
-    pipe.vae.requires_grad_(False)
+    
+    # Unfreeze LoRA layers
+    unfreeze_all_LoRA_layers(pipe.unet)
+    
+    # Freeze other parameters
+    for name, param in pipe.unet.named_parameters():
+        if 'lora' not in name:
+            param.requires_grad_(False)
 
     # Prepare optimizer (only optimize LoRA parameters)
-    optimizer = torch.optim.AdamW(lora_params_to_optimize, lr=1e-4)
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, pipe.unet.parameters()), lr=1e-4)
 
     # Prepare noise scheduler
     noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
@@ -326,11 +322,10 @@ def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=10
         if step % 100 == 0:
             print(f"Step {step}/{num_steps}, Loss: {loss.item():.4f}")
 
-    # After training, save the LoRA weights
-    pipe.unet.save_attn_procs("./photo.lora")
+    # After training, fuse LoRA weights into the main model
+    fuse_LoRA_into_linear(pipe.unet, target_replace_modules=ATTENTION_MODULES)
 
     return pipe
-
 
 def train_step(pipe, image, prompt, noise_scheduler, text_encoder):
     # Encode the prompt
