@@ -228,18 +228,41 @@ pipe.enable_attention_slicing()  # For memory efficiency
 # Implement LoRA for personalization
 # Here we use a simplified version; in practice, use a LoRA library or implementation
 def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=1000):
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    import fnmatch
+
+    # Define target modules with wildcards
+    target_modules = [
+        '.*attn1.to_q',
+        '.*attn1.to_k',
+        '.*attn1.to_v',
+        '.*attn1.to_out.0',
+        '.*attn2.to_q',
+        '.*attn2.to_k',
+        '.*attn2.to_v',
+        '.*attn2.to_out.0',
+    ]
+
+
+    # Function to check if a module is a target module
+    def is_target_module(name):
+        return any(fnmatch.fnmatch(name, pattern) for pattern in target_modules)
+
     config = LoraConfig(
         r=4,
         lora_alpha=32,
-        target_modules=["to_q", "to_k", "to_v", "to_out"],
+        target_modules=target_modules,
         lora_dropout=0.05,
         bias="none",
     )
-    for name, module in pipe.unet.named_modules():
-        if any(x in name for x in ["to_q", "to_k", "to_v", "to_out"]):
-            print(name)
+
+    # Prepare the model for PEFT
+    pipe.unet = prepare_model_for_kbit_training(pipe.unet)
+
+    # Apply PEFT with custom module matching
     pipe.unet = get_peft_model(pipe.unet, config)
-    
+
+
     # Freeze text encoder and VAE
     pipe.text_encoder.requires_grad_(False)
     pipe.vae.requires_grad_(False)
