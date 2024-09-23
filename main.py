@@ -247,8 +247,10 @@ pipe.enable_attention_slicing()  # For memory efficiency
 # Implement LoRA for personalization
 # Here we use a simplified version; in practice, use a LoRA library or implementation
 
-
 def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=1000):
+    # Move the entire pipeline to the specified device
+    pipe = pipe.to(device)
+    
     # Inject LoRA into the UNet
     inject_trainable_LoRA(
         model=pipe.unet,
@@ -275,7 +277,7 @@ def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=10
     for step in range(num_steps):
         # Randomly select an image and its corresponding prompt
         idx = torch.randint(0, len(concept_images), (1,)).item()
-        image = concept_images[idx:idx+1]
+        image = concept_images[idx:idx+1].to(device)
         prompt = "a photo of a car"
 
         # Encode the prompt
@@ -285,7 +287,7 @@ def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=10
             max_length=pipe.tokenizer.model_max_length,
             truncation=True,
             return_tensors="pt"
-        ).to(image.device)
+        ).to(device)
         encoder_hidden_states = pipe.text_encoder(text_input.input_ids)[0]
 
         # Prepare the image
@@ -301,7 +303,7 @@ def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=10
 
         # Sample a random timestep for each image
         timesteps = torch.randint(
-            0, noise_scheduler.num_train_timesteps, (batch_size,), device=latents.device
+            0, noise_scheduler.config.num_train_timesteps, (batch_size,), device=latents.device
         ).long()
 
         # Add noise to the latents according to the noise magnitude at each timestep
@@ -384,20 +386,17 @@ def lds_loss(pipe, personalized_pipe, image, prompt, t):
 def generate_concept_images(pipe, num_images=40, prompt="a photo of a car"):
     concept_images = []
     for _ in range(num_images):
-        # Add random attributes to diversify the generated images
         attributes = ["red", "blue", "black", "white", "SUV", "sedan", "sports car"]
         random_attribute = random.choice(attributes)
         full_prompt = f"{prompt}, {random_attribute}"
         
-        # Generate image
         with torch.no_grad():
-            image = pipe(full_prompt).images[0]
+            image = pipe(full_prompt, num_inference_steps=50).images[0]
         
-        # Convert to tensor and normalize
         image = T.ToTensor()(image).unsqueeze(0)
         concept_images.append(image)
     
-    return torch.cat(concept_images, dim=0)
+    return torch.cat(concept_images, dim=0).to(device)
 
 # Generate concept images
 concept_images = generate_concept_images(pipe).to(device) 
