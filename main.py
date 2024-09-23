@@ -231,17 +231,34 @@ def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=10
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     import fnmatch
 
-    # Define target modules with wildcards
+        # Define target modules with wildcards
     target_modules = [
-        '.*attn1.to_q',
-        '.*attn1.to_k',
-        '.*attn1.to_v',
-        '.*attn1.to_out.0',
-        '.*attn2.to_q',
-        '.*attn2.to_k',
-        '.*attn2.to_v',
-        '.*attn2.to_out.0',
+        "down_blocks.*.attentions.*.transformer_blocks.*.attn1.to_q",
+        "down_blocks.*.attentions.*.transformer_blocks.*.attn1.to_k",
+        "down_blocks.*.attentions.*.transformer_blocks.*.attn1.to_v",
+        "down_blocks.*.attentions.*.transformer_blocks.*.attn1.to_out.0",
+        "down_blocks.*.attentions.*.transformer_blocks.*.attn2.to_q",
+        "down_blocks.*.attentions.*.transformer_blocks.*.attn2.to_k",
+        "down_blocks.*.attentions.*.transformer_blocks.*.attn2.to_v",
+        "down_blocks.*.attentions.*.transformer_blocks.*.attn2.to_out.0",
+        "up_blocks.*.attentions.*.transformer_blocks.*.attn1.to_q",
+        "up_blocks.*.attentions.*.transformer_blocks.*.attn1.to_k",
+        "up_blocks.*.attentions.*.transformer_blocks.*.attn1.to_v",
+        "up_blocks.*.attentions.*.transformer_blocks.*.attn1.to_out.0",
+        "up_blocks.*.attentions.*.transformer_blocks.*.attn2.to_q",
+        "up_blocks.*.attentions.*.transformer_blocks.*.attn2.to_k",
+        "up_blocks.*.attentions.*.transformer_blocks.*.attn2.to_v",
+        "up_blocks.*.attentions.*.transformer_blocks.*.attn2.to_out.0",
+        "mid_block.attentions.*.transformer_blocks.*.attn1.to_q",
+        "mid_block.attentions.*.transformer_blocks.*.attn1.to_k",
+        "mid_block.attentions.*.transformer_blocks.*.attn1.to_v",
+        "mid_block.attentions.*.transformer_blocks.*.attn1.to_out.0",
+        "mid_block.attentions.*.transformer_blocks.*.attn2.to_q",
+        "mid_block.attentions.*.transformer_blocks.*.attn2.to_k",
+        "mid_block.attentions.*.transformer_blocks.*.attn2.to_v",
+        "mid_block.attentions.*.transformer_blocks.*.attn2.to_out.0",
     ]
+
 
 
     # Function to check if a module is a target module
