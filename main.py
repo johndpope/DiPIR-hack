@@ -8,7 +8,9 @@ import numpy as np
 from peft import LoraConfig, get_peft_model
 import random
 from pytorch3d.renderer import TexturesVertex
-
+import bpy
+import trimesh
+import os
 
 # PyTorch3D for differentiable rendering
 from pytorch3d.io import load_objs_as_meshes
@@ -43,8 +45,65 @@ Ibg = bg_transform(background_image).unsqueeze(0).to(device)  # Shape: [1, 3, H,
 # Step 2: Load Virtual Object Mesh
 # --------------------------
 # Load the virtual object mesh
-# Replace 'virtual_object.obj' with your object file path
-virtual_object_mesh = load_objs_as_meshes(['virtual_object.obj'], device=device)
+# Function to load virtual object from .blend file
+def load_virtual_object_from_blend(blend_file_path, object_name, device='cuda'):
+    import bpy
+    import numpy as np
+    import torch
+    from pytorch3d.structures import Meshes
+    from pytorch3d.renderer import TexturesVertex
+
+    # Open the .blend file
+    bpy.ops.wm.open_mainfile(filepath=blend_file_path)
+    
+    # Find the object in the scene
+    if object_name not in bpy.data.objects:
+        raise ValueError(f"Object '{object_name}' not found in file '{blend_file_path}'")
+    
+    obj = bpy.data.objects[object_name]
+    
+    # Ensure the object is a mesh
+    if obj.type != 'MESH':
+        raise ValueError(f"Object '{object_name}' is not a mesh")
+    
+    # Triangulate the mesh
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.mesh.quads_convert_to_tris()
+    bpy.ops.object.mode_set(mode='OBJECT')
+    
+    # Get mesh data
+    mesh = obj.data
+
+    # Apply object transformations to vertices
+    vertices = np.array([obj.matrix_world @ v.co for v in mesh.vertices], dtype=np.float32)
+    
+    # Extract faces (triangles)
+    faces = [list(p.vertices) for p in mesh.polygons]
+
+    # Verify that all faces are triangles
+    if not all(len(face) == 3 for face in faces):
+        raise ValueError("Not all faces are triangles after triangulation.")
+    
+    # Convert faces to a NumPy array
+    faces = np.array(faces, dtype=np.int64)
+    
+    # Convert to PyTorch tensors
+    verts = torch.tensor(vertices, dtype=torch.float32, device=device)
+    faces = torch.tensor(faces, dtype=torch.int64, device=device)
+    
+    # Create a Meshes object
+    pytorch3d_mesh = Meshes(verts=[verts], faces=[faces])
+    
+    # Add default white vertex colors as textures
+    num_verts = pytorch3d_mesh.num_verts_per_mesh().item()
+    verts_features = torch.ones((1, num_verts, 3), device=device)
+    pytorch3d_mesh.textures = TexturesVertex(verts_features=verts_features)
+    
+    return pytorch3d_mesh
+
+
 
 # --------------------------
 # Step 3: Define Proxy Geometry (Plane)
@@ -72,16 +131,14 @@ def create_plane(size=5.0, device='cpu'):
 # Create the plane
 plane_mesh = create_plane(size=5.0, device=device)
 
+# Usage in the main script
+blend_file_path = "Television_01_4k/Television_01_4k.blend"  # Replace with the actual path
+object_name = "Television_01"  # Replace with the actual object name in the .blend file
+virtual_object_mesh = load_virtual_object_from_blend(blend_file_path, object_name, device=device)
 
-# Ensure both meshes have vertex textures
-if not isinstance(virtual_object_mesh.textures, TexturesVertex):
-    # Assign default white vertex colors
-    num_verts = virtual_object_mesh.num_verts_per_mesh().item()
-    verts_features = torch.ones((1, num_verts, 3), device=device)
-    virtual_object_mesh.textures = TexturesVertex(verts_features=verts_features)
-
-# Combine the meshes
+# The rest of your script remains the same
 scene_mesh = join_meshes_as_scene([virtual_object_mesh, plane_mesh])
+
 # --------------------------
 # Step 4: Define Optimizable Environment Lighting
 # --------------------------
@@ -192,7 +249,7 @@ def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=10
     
     # Create corresponding prompts
     target_prompt = "a scene in the style of sks rendering"
-    concept_prompts = ["a photo of a white delorean time travel car"] * len(concept_images)
+    concept_prompts = ["a photo of a car"] * len(concept_images)
     all_prompts = [target_prompt] + concept_prompts
     
     # Prepare optimizer
