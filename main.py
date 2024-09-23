@@ -11,6 +11,9 @@ from pytorch3d.renderer import TexturesVertex
 import bpy
 import trimesh
 import os
+from diffusers import UNet2DConditionModel
+
+
 
 # PyTorch3D for differentiable rendering
 from pytorch3d.io import load_objs_as_meshes
@@ -26,9 +29,23 @@ from pytorch3d.structures import join_meshes_as_scene
 # Diffusers library for Stable Diffusion
 from diffusers import StableDiffusionPipeline,DDPMScheduler
 from transformers import CLIPTextModel, CLIPTokenizer
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+import fnmatch
+from diffusers.models.attention_processor import LoRAAttnProcessor
+from diffusers.loaders import AttnProcsLayers
+from lora import inject_trainable_lora
 
+
+
+import diffusers
+print("🎯 diffusers:",diffusers.__version__)
 # Device configuration
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+
+
+    
 
 # --------------------------
 # Step 1: Load Background Image
@@ -222,102 +239,98 @@ renderer = MeshRenderer(
 # Step 7: Load and Personalize Diffusion Model with LoRA
 # --------------------------
 # Load Stable Diffusion pipeline
-pipe = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5").to(device)
+pipe = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5",
+    safety_checker=None,
+    requires_safety_checker=False
+).to(device)
 pipe.enable_attention_slicing()  # For memory efficiency
 
 # Implement LoRA for personalization
 # Here we use a simplified version; in practice, use a LoRA library or implementation
+from diffusers import UNet2DConditionModel
+from diffusers.models.attention_processor import LoRAAttnProcessor
+import itertools
+
+
+
 def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=1000):
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-    import fnmatch
-
-        # Define target modules with wildcards
-    target_modules = [
-        "down_blocks.*.attentions.*.transformer_blocks.*.attn1.to_q",
-        "down_blocks.*.attentions.*.transformer_blocks.*.attn1.to_k",
-        "down_blocks.*.attentions.*.transformer_blocks.*.attn1.to_v",
-        "down_blocks.*.attentions.*.transformer_blocks.*.attn1.to_out.0",
-        "down_blocks.*.attentions.*.transformer_blocks.*.attn2.to_q",
-        "down_blocks.*.attentions.*.transformer_blocks.*.attn2.to_k",
-        "down_blocks.*.attentions.*.transformer_blocks.*.attn2.to_v",
-        "down_blocks.*.attentions.*.transformer_blocks.*.attn2.to_out.0",
-        "up_blocks.*.attentions.*.transformer_blocks.*.attn1.to_q",
-        "up_blocks.*.attentions.*.transformer_blocks.*.attn1.to_k",
-        "up_blocks.*.attentions.*.transformer_blocks.*.attn1.to_v",
-        "up_blocks.*.attentions.*.transformer_blocks.*.attn1.to_out.0",
-        "up_blocks.*.attentions.*.transformer_blocks.*.attn2.to_q",
-        "up_blocks.*.attentions.*.transformer_blocks.*.attn2.to_k",
-        "up_blocks.*.attentions.*.transformer_blocks.*.attn2.to_v",
-        "up_blocks.*.attentions.*.transformer_blocks.*.attn2.to_out.0",
-        "mid_block.attentions.*.transformer_blocks.*.attn1.to_q",
-        "mid_block.attentions.*.transformer_blocks.*.attn1.to_k",
-        "mid_block.attentions.*.transformer_blocks.*.attn1.to_v",
-        "mid_block.attentions.*.transformer_blocks.*.attn1.to_out.0",
-        "mid_block.attentions.*.transformer_blocks.*.attn2.to_q",
-        "mid_block.attentions.*.transformer_blocks.*.attn2.to_k",
-        "mid_block.attentions.*.transformer_blocks.*.attn2.to_v",
-        "mid_block.attentions.*.transformer_blocks.*.attn2.to_out.0",
-    ]
-
-
-
-    # Function to check if a module is a target module
-    def is_target_module(name):
-        return any(fnmatch.fnmatch(name, pattern) for pattern in target_modules)
-
-    config = LoraConfig(
-        r=4,
-        lora_alpha=32,
-        target_modules=target_modules,
-        lora_dropout=0.05,
-        bias="none",
+    # Set up LoRA for UNet
+    lora_unet_target_modules = {"CrossAttention", "Attention", "GEGLU"}
+    require_grad_params, names = inject_trainable_lora(
+        model=pipe.unet,
+        target_replace_module=lora_unet_target_modules,
+        r=4,  # LoRA rank
+        loras=None,  # Path to existing LoRA weights if any
+        dropout_p=0.1,
     )
+    lora_params_to_optimize = [{"params": itertools.chain(*require_grad_params)}]
 
-    # Prepare the model for PEFT
-    pipe.unet = prepare_model_for_kbit_training(pipe.unet)
-
-    # Apply PEFT with custom module matching
-    pipe.unet = get_peft_model(pipe.unet, config)
-
-
-    # Freeze text encoder and VAE
+    pipe.unet.train()
     pipe.text_encoder.requires_grad_(False)
     pipe.vae.requires_grad_(False)
-    
-    # Combine target image and concept images
-    all_images = torch.cat([target_image, concept_images], dim=0)
-    
-    # Create corresponding prompts
-    target_prompt = "a scene in the style of sks rendering"
-    concept_prompts = ["a photo of a car"] * len(concept_images)
-    all_prompts = [target_prompt] + concept_prompts
-    
-    # Prepare optimizer
-    optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=1e-4)
-    
+
+    # Prepare optimizer (only optimize LoRA parameters)
+    optimizer = torch.optim.AdamW(lora_params_to_optimize, lr=1e-4)
+
     # Prepare noise scheduler
-    noise_scheduler = DDPMScheduler.from_pretrained(pipe.scheduler.config.name)
-    
+    noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+
     # Training loop
     for step in range(num_steps):
         # Randomly select an image and its corresponding prompt
-        idx = torch.randint(0, len(all_images), (1,)).item()
-        image = all_images[idx:idx+1]
-        prompt = all_prompts[idx]
-        
-        # Perform a training step
-        loss = train_step(pipe, image, prompt, noise_scheduler, pipe.text_encoder)
-        
+        idx = torch.randint(0, len(concept_images), (1,)).item()
+        image = concept_images[idx:idx+1]
+        prompt = "a photo of a car"
+
+        # Encode the prompt
+        text_input = pipe.tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=pipe.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt"
+        ).to(image.device)
+        encoder_hidden_states = pipe.text_encoder(text_input.input_ids)[0]
+
+        # Prepare the image
+        image = image.to(device=pipe.device, dtype=pipe.unet.dtype)
+
+        # Encode the image into latent space
+        latents = pipe.vae.encode(image).latent_dist.sample()
+        latents = latents * 0.18215
+
+        # Sample noise to add to the latents
+        noise = torch.randn_like(latents)
+        batch_size = latents.shape[0]
+
+        # Sample a random timestep for each image
+        timesteps = torch.randint(
+            0, noise_scheduler.num_train_timesteps, (batch_size,), device=latents.device
+        ).long()
+
+        # Add noise to the latents according to the noise magnitude at each timestep
+        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+
+        # Predict the noise residual
+        noise_pred = pipe.unet(noisy_latents, timesteps, encoder_hidden_states).sample
+
+        # Compute loss
+        loss = F.mse_loss(noise_pred, noise)
+
         # Backpropagate and optimize
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-        
+
         # Log progress
         if step % 100 == 0:
             print(f"Step {step}/{num_steps}, Loss: {loss.item():.4f}")
-    
+
+    # After training, save the LoRA weights
+    pipe.unet.save_attn_procs("./photo.lora")
+
     return pipe
+
 
 def train_step(pipe, image, prompt, noise_scheduler, text_encoder):
     # Encode the prompt
@@ -392,11 +405,9 @@ def generate_concept_images(pipe, num_images=40, prompt="a photo of a car"):
     return torch.cat(concept_images, dim=0)
 
 # Generate concept images
-concept_images = generate_concept_images(pipe)
+concept_images = generate_concept_images(pipe).to(device) 
 
 
-
-# For simplicity, we'll proceed without personalization
 
 # --------------------------
 # Step 8: Define Optimization Loop
