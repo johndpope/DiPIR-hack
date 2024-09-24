@@ -13,6 +13,8 @@ import trimesh
 import os
 from diffusers import UNet2DConditionModel
 from lora_utils import inject_trainable_LoRA, fuse_LoRA_into_linear, unfreeze_all_LoRA_layers, ATTENTION_MODULES
+import os
+from accelerate import Accelerator
 
 # PyTorch3D for differentiable rendering
 from pytorch3d.io import load_objs_as_meshes
@@ -498,43 +500,116 @@ def compute_visibility_mask(renderer, scene_mesh, background_mesh):
     V = (scene_depth.zbuf < bg_depth.zbuf).float()
     
     return V   
- 
+
+
+# Initialize the Accelerator
+accelerator = Accelerator()
+
+# Wrap the model, optimizer, and data loader (if any) with accelerator
+env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow = accelerator.prepare(
+    env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow
+)
+optimizer = accelerator.prepare(optimizer)
+
+
+# Define the checkpoint directory and image output directory
+checkpoint_dir = "./checkpoints"
+image_output_dir = "./output_images"
+os.makedirs(checkpoint_dir, exist_ok=True)
+os.makedirs(image_output_dir, exist_ok=True)
+
+# Function to save checkpoint
+def save_checkpoint(iteration):
+    checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{iteration}.pt")
+    accelerator.save({
+        "model_fg": env_light_fg.state_dict(),
+        "model_shadow": env_light_shadow.state_dict(),
+        "tone_mapping_fg": tone_mapping_fg.state_dict(),
+        "tone_mapping_shadow": tone_mapping_shadow.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "iteration": iteration
+    }, checkpoint_path)
+    print(f"Checkpoint saved at iteration {iteration}")
+
+# Function to load checkpoint
+def load_checkpoint():
+    checkpoints = [f for f in os.listdir(checkpoint_dir) if f.startswith("checkpoint_") and f.endswith(".pt")]
+    if not checkpoints:
+        return 0  # Start from the beginning if no checkpoints found
+    
+    latest_checkpoint = max(checkpoints, key=lambda x: int(x.split("_")[1].split(".")[0]))
+    checkpoint_path = os.path.join(checkpoint_dir, latest_checkpoint)
+    loaded_state = accelerator.load(checkpoint_path)
+    
+    env_light_fg.load_state_dict(loaded_state["model_fg"])
+    env_light_shadow.load_state_dict(loaded_state["model_shadow"])
+    tone_mapping_fg.load_state_dict(loaded_state["tone_mapping_fg"])
+    tone_mapping_shadow.load_state_dict(loaded_state["tone_mapping_shadow"])
+    optimizer.load_state_dict(loaded_state["optimizer"])
+    
+    start_iteration = loaded_state["iteration"] + 1
+    print(f"Resumed from checkpoint at iteration {start_iteration - 1}")
+    return start_iteration
+
+
+# Function to save Icomp as an image
+def save_icomp_image(Icomp, iteration):
+    output_image = Icomp.detach().cpu().squeeze().permute(1, 2, 0).numpy()
+    output_image = np.clip(output_image * 255, 0, 255).astype(np.uint8)
+    Image.fromarray(output_image).save(os.path.join(image_output_dir, f'Icomp_iteration_{iteration}.png'))
+
+# Optimization loop
 num_iterations = 500
-for iteration in range(num_iterations):
-    optimizer.zero_grad()
-    
-    # Render foreground
-    Ifg = renderer(scene_mesh, lights=env_light_fg())
-    Ifg = Ifg.permute(0, 3, 1, 2)  # [batch_size, 3, H, W]
-    
-    # Render shadow
-    shadow_render = renderer(plane_mesh, lights=env_light_shadow())
-    shadow_render = shadow_render.permute(0, 3, 1, 2)  # [batch_size, 3, H, W]
-    bg_render = renderer(plane_mesh, lights=env_light_fg())
-    bg_render = bg_render.permute(0, 3, 1, 2)  # [batch_size, 3, H, W]
-    beta_shadow = shadow_render / (bg_render + 1e-6)
-    
-    # Apply tone mapping
-    Ifg_tone = tone_mapping_fg(Ifg)
-    beta_shadow_tone = tone_mapping_shadow(beta_shadow)
-    
-    # Compute visibility mask
-    V = compute_visibility_mask(renderer, scene_mesh, plane_mesh)
-    
-    # Composite
-    Icomp = (1 - V) * beta_shadow_tone * Ibg + V * Ifg_tone
-    
-    # Compute LDS loss
-    prompt = "A photo of a car in a realistic scene"
-    t = torch.randint(0, pipe.scheduler.num_train_timesteps, (1,), device=device)
-    loss = lds_loss(pipe, personalized_pipe, Icomp, prompt, t)
-    
-    # Add regularization terms
-    loss += lambda_consistency * consistency_loss(env_light_fg, env_light_shadow)
-    loss += lambda_reg * regularization_loss(env_light_shadow)
-    
-    loss.backward()
-    optimizer.step()
+start_iteration = load_checkpoint()  # Load the latest checkpoint if it exists
+
+for iteration in range(start_iteration, num_iterations):
+    with accelerator.accumulate(env_light_fg):
+        optimizer.zero_grad()
+        
+        # Get light directions from EnvironmentLight
+        fg_light_directions = env_light_fg.get_light_directions()
+        shadow_light_directions = env_light_shadow.get_light_directions()
+        
+        # Render foreground
+        fg_lights = DirectionalLights(device=device, direction=fg_light_directions, ambient_color=env_light_fg(fg_light_directions))
+        Ifg = renderer(scene_mesh, lights=fg_lights)
+        Ifg = Ifg[..., :3].permute(0, 3, 1, 2)  # [batch_size, 3, H, W]
+        
+        # Render shadow
+        shadow_lights = DirectionalLights(device=device, direction=shadow_light_directions, ambient_color=env_light_shadow(shadow_light_directions))
+        shadow_render = renderer(plane_mesh, lights=shadow_lights)
+        shadow_render = shadow_render[..., :3].permute(0, 3, 1, 2)  # [batch_size, 3, H, W]
+        
+        bg_lights = DirectionalLights(device=device, direction=fg_light_directions, ambient_color=env_light_fg(fg_light_directions))
+        bg_render = renderer(plane_mesh, lights=bg_lights)
+        bg_render = bg_render[..., :3].permute(0, 3, 1, 2)  # [batch_size, 3, H, W]
+        
+        beta_shadow = shadow_render / (bg_render + 1e-6)
+        
+        # Apply tone mapping
+        Ifg_tone = tone_mapping_fg(Ifg)
+        beta_shadow_tone = tone_mapping_shadow(beta_shadow)
+        
+        # Compute visibility mask
+        V = compute_visibility_mask(renderer, scene_mesh, plane_mesh)
+        
+        # Composite
+        Icomp = (1 - V) * beta_shadow_tone * Ibg + V * Ifg_tone
+        
+        # Compute LDS loss
+        prompt = "A photo of a car in a realistic scene"
+        t = torch.randint(0, pipe.scheduler.num_train_timesteps, (1,), device=device)
+        loss = lds_loss(pipe, personalized_pipe, Icomp, prompt, t)
+        
+        # Add regularization terms
+        loss += lambda_consistency * consistency_loss(env_light_fg, env_light_shadow)
+        loss += lambda_reg * regularization_loss(env_light_shadow)
+        
+        # Backward pass
+        accelerator.backward(loss)
+        
+        # Optimizer step
+        optimizer.step()
     
     # Progressively fuse environment maps
     fuse_environment_maps(env_light_fg, env_light_shadow, iteration / num_iterations)
@@ -542,12 +617,22 @@ for iteration in range(num_iterations):
     if iteration % 50 == 0:
         print(f"Iteration {iteration} Loss: {loss.item()}")
         
+        # Save checkpoint
+        save_checkpoint(iteration)
+        
         # Optionally save intermediate images
         output_image = Icomp.detach().cpu().squeeze().permute(1, 2, 0).numpy()
         output_image = (output_image * 255).astype(np.uint8)
         Image.fromarray(output_image).save(f'output_{iteration}.png')
 
+  # Save Icomp image every 100 iterations
+    if iteration % 100 == 0:
+        save_icomp_image(Icomp, iteration)
+        
 # Save the final composite image
 output_image = Icomp.detach().cpu().squeeze().permute(1, 2, 0).numpy()
 output_image = (output_image * 255).astype(np.uint8)
 Image.fromarray(output_image).save('final_output.png')
+
+# Save final checkpoint
+save_checkpoint(num_iterations - 1)
