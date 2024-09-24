@@ -35,23 +35,26 @@ class ToneMapping(nn.Module):
         self.slopes = nn.Parameter(torch.ones(num_bins + 1, device=device))
 
     def forward(self, x):
+        original_shape = x.shape
+        x = x.flatten()
         x = torch.clamp(x, 0, 1)
         device = x.device
 
         bin_edges = torch.cumsum(self.widths, 0)
-        bin_idx = torch.searchsorted(bin_edges.unsqueeze(0).expand(x.shape[0], -1), x.flatten())
+        bin_idx = torch.searchsorted(bin_edges, x)
         bin_idx = torch.clamp(bin_idx, 0, self.num_bins - 1)
         
         widths_cumsum = torch.cat([torch.zeros(1, device=device), bin_edges[:-1]])
-        x_low = widths_cumsum[bin_idx].view_as(x)
-        x_high = (widths_cumsum + self.widths)[bin_idx].view_as(x)
-        y_low = self.heights[:-1][bin_idx].view_as(x)
-        y_high = self.heights[1:][bin_idx].view_as(x)
-        slope_low = self.slopes[:-1][bin_idx].view_as(x)
-        slope_high = self.slopes[1:][bin_idx].view_as(x)
+        x_low = widths_cumsum[bin_idx]
+        x_high = (widths_cumsum + self.widths)[bin_idx]
+        y_low = self.heights[:-1][bin_idx]
+        y_high = self.heights[1:][bin_idx]
+        slope_low = self.slopes[:-1][bin_idx]
+        slope_high = self.slopes[1:][bin_idx]
         
         t = (x - x_low) / (x_high - x_low + 1e-8)
         numerator = slope_low * t ** 2 + 2 * t * (1 - t)
         denominator = (slope_low + slope_high) * t ** 2 + 2 * (slope_low + slope_high - 2) * t + 2
         y = y_low + (y_high - y_low) * numerator / denominator
-        return y
+        
+        return y.reshape(original_shape)
