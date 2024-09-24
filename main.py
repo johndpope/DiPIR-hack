@@ -247,9 +247,14 @@ pipe.enable_attention_slicing()  # For memory efficiency
 # Implement LoRA for personalization
 # Here we use a simplified version; in practice, use a LoRA library or implementation
 
-def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=1000):
+def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=1000, device=None):
     # Move the entire pipeline to the specified device
+    if device is None:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
     pipe = pipe.to(device)
+    target_image = target_image.to(device)
+    concept_images = concept_images.to(device)
     
     # Inject LoRA into the UNet
     inject_trainable_LoRA(
@@ -421,8 +426,11 @@ params = (list(env_light_fg.parameters()) + list(env_light_shadow.parameters()) 
 
 optimizer = optim.Adam(params, lr=1e-2)
 
+pipe = pipe.to(device)
+Ibg = Ibg.to(device)
+
 # Personalize the diffusion model (assuming this has been done)
-personalized_pipe = personalize_diffusion_model(pipe, Ibg, concept_images)
+personalized_pipe = personalize_diffusion_model(pipe, Ibg, concept_images,1000,device)
 
 # Constants for regularization
 lambda_consistency = 0.03

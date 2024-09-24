@@ -61,10 +61,12 @@ class LoRAWrapper(nn.Module):
         assert num_packed_linear * rank <= min(self.in_features, self.out_features), \
             f'LoRA rank {num_packed_linear} * {rank} must be less or equal than {min(self.in_features, self.out_features)}'
         
+        device = linear.weight.device  # Get the device of the original linear layer
         self.linear = linear
-        self.lora_down = nn.Linear(self.in_features, num_packed_linear*rank, bias=False)
-        self.lora_up = nn.Linear(num_packed_linear*rank, self.out_features, bias=False)
+        self.lora_down = nn.Linear(self.in_features, num_packed_linear*rank, bias=False).to(device)
+        self.lora_up = nn.Linear(num_packed_linear*rank, self.out_features, bias=False).to(device)
 
+       
         nn.init.normal_(self.lora_down.weight, std=1/rank)
         nn.init.zeros_(self.lora_up.weight)
         
