@@ -575,6 +575,7 @@ def load_checkpoint():
 
 # Function to save Icomp as an image
 def save_icomp_image(Icomp, iteration):
+    print("save_icomp_image")
     output_image = Icomp.detach().cpu().squeeze().permute(1, 2, 0).numpy()
     output_image = np.clip(output_image * 255, 0, 255).astype(np.uint8)
     Image.fromarray(output_image).save(os.path.join(image_output_dir, f'Icomp_iteration_{iteration}.png'))
@@ -631,6 +632,8 @@ for iteration in range(start_iteration, num_iterations):
         
         # Optimizer step
         optimizer.step()
+        
+        save_icomp_image(Icomp, iteration)
     
     # Progressively fuse environment maps
     fuse_environment_maps(env_light_fg, env_light_shadow, iteration / num_iterations)
@@ -646,9 +649,8 @@ for iteration in range(start_iteration, num_iterations):
         output_image = (output_image * 255).astype(np.uint8)
         Image.fromarray(output_image).save(f'output_{iteration}.png')
 
-  # Save Icomp image every 100 iterations
-    if iteration % 1 == 0:
-        save_icomp_image(Icomp, iteration)
+
+        
         
 # Save the final composite image
 output_image = Icomp.detach().cpu().squeeze().permute(1, 2, 0).numpy()

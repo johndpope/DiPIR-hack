@@ -1,0 +1,50 @@
+# Device configuration
+device: 'cuda'
+
+# Paths
+background_image_path: 'multi_bg.jpg'
+blend_file_path: 'Television_01_4k/Television_01_4k.blend'
+object_name: 'Television_01'
+
+# Image settings
+image_size: 512
+
+# Plane settings
+plane_size: 5.0
+
+# Environment Light settings
+num_lobes: 32
+
+# Tone Mapping settings
+num_bins: 5
+
+# Optimization settings
+num_iterations: 500
+learning_rate: 1e-2
+lambda_consistency: 0.03
+lambda_reg: 0.01
+
+# Checkpoint settings
+checkpoint_dir: './checkpoints'
+image_output_dir: './output_images'
+lora_weights_dir: './lora_weights'
+
+# Diffusion model settings
+diffusion_model_path: 'runwayml/stable-diffusion-v1-5'
+lora_rank: 4
+lora_scale: 1.0
+
+# Training settings
+num_concept_images: 5
+concept_image_prompt: 'a photo of a car'
+personalization_steps: 1000
+
+# Rendering settings
+raster_settings:
+  image_size: 512
+  blur_radius: 0.0
+  faces_per_pixel: 1
+
+blend_params:
+  sigma: 1e-4
+  gamma: 1e-4
