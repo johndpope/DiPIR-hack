@@ -88,17 +88,37 @@ def personalize_diffusion_model(config, bg_transform,device):
             optimizer.step()
 
     return pipe
-
-
 def lds_loss(pipe, personalized_pipe, image, prompt, t):
+    # Get the device from the unet model inside the pipeline
+    device = pipe.unet.device
+    
+    # Ensure the image is on the same device as the model
+    image = image.to(device)
+
+    # Encode the image to latent space
     with torch.no_grad():
         latents = pipe.vae.encode(image).latent_dist.sample() * 0.18215
-        noise = torch.randn_like(latents)
-        noisy_latents = pipe.scheduler.add_noise(latents, noise, t)
-    
-    text_embeddings = pipe.text_encoder(prompt)[0]
-    
-    noise_pred = personalized_pipe.unet(noisy_latents, t, encoder_hidden_states=text_embeddings).sample
-    noise_pred_original = pipe.unet(noisy_latents, t, encoder_hidden_states=text_embeddings).sample
-    
-    return F.mse_loss(noise_pred - noise_pred_original, noise)
+        latents = latents.to(device)
+
+    # Get text embeddings
+    text_input = pipe.tokenizer(prompt, padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt")
+    text_input = text_input.to(device)
+    text_embeddings = pipe.text_encoder(text_input.input_ids)[0]
+    text_embeddings = text_embeddings.to(device)
+
+    # Prepare latent variables
+    noise = torch.randn_like(latents)
+    t = t.to(device)
+    noisy_latents = pipe.scheduler.add_noise(latents, noise, t)
+
+    # Get the target for loss
+    with torch.no_grad():
+        noise_pred_uncond = pipe.unet(noisy_latents, t, encoder_hidden_states=text_embeddings).sample
+
+    # Get the prediction
+    noise_pred_cond = personalized_pipe.unet(noisy_latents, t, encoder_hidden_states=text_embeddings).sample
+
+    # Compute loss
+    loss = F.mse_loss(noise_pred_cond.float(), noise_pred_uncond.float())
+
+    return loss

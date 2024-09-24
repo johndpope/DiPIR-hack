@@ -80,18 +80,15 @@ pipe,env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow, optim
 concept_images = generate_concept_images(pipe, config.num_concept_images, config.concept_image_prompt).to(device)
 personalized_pipe = personalize_diffusion_model(config, bg_transform, device)
 
-# Personalize the diffusion model (assuming this has been done)
-# personalized_pipe = personalize_diffusion_model(pipe, Ibg, concept_images,1000,device)
-
 # Create directories
 os.makedirs(config.checkpoint_dir, exist_ok=True)
 os.makedirs(config.image_output_dir, exist_ok=True)
 os.makedirs(config.lora_weights_dir, exist_ok=True)
 
 # Define checkpoint functions
-def save_checkpoint(iteration):
+def save_checkpoint(iteration, env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow, optimizer, personalized_pipe):
     checkpoint_path = os.path.join(config.checkpoint_dir, f"checkpoint_{iteration}.pt")
-    accelerator.save({
+    torch.save({
         "model_fg": env_light_fg.state_dict(),
         "model_shadow": env_light_shadow.state_dict(),
         "tone_mapping_fg": tone_mapping_fg.state_dict(),
@@ -102,10 +99,17 @@ def save_checkpoint(iteration):
     print(f"Checkpoint saved at iteration {iteration}")
     
     # Save LoRA weights
-    lora_state_dict = get_peft_model_state_dict(personalized_pipe.unet)
-    lora_path = os.path.join(config.lora_weights_dir, f"lora_weights_{iteration}.pt")
-    accelerator.save(lora_state_dict, lora_path)
-    print(f"LoRA weights saved at iteration {iteration}")
+    lora_state_dict = {}
+    for name, module in personalized_pipe.unet.named_modules():
+        if 'lora_' in name:
+            lora_state_dict[name] = module.state_dict()
+    
+    if lora_state_dict:
+        lora_path = os.path.join(config.lora_weights_dir, f"lora_weights_{iteration}.pt")
+        torch.save(lora_state_dict, lora_path)
+        print(f"LoRA weights saved at iteration {iteration}")
+    else:
+        print("No LoRA weights found to save.")
 
 def load_checkpoint():
     checkpoints = [f for f in os.listdir(config.checkpoint_dir) if f.startswith("checkpoint_") and f.endswith(".pt")]
@@ -114,7 +118,7 @@ def load_checkpoint():
     
     latest_checkpoint = max(checkpoints, key=lambda x: int(x.split("_")[1].split(".")[0]))
     checkpoint_path = os.path.join(config.checkpoint_dir, latest_checkpoint)
-    loaded_state = accelerator.load(checkpoint_path)
+    loaded_state = torch.load(checkpoint_path, map_location=device)
     
     env_light_fg.load_state_dict(loaded_state["model_fg"])
     env_light_shadow.load_state_dict(loaded_state["model_shadow"])
@@ -125,13 +129,26 @@ def load_checkpoint():
     iteration = loaded_state["iteration"]
     lora_path = os.path.join(config.lora_weights_dir, f"lora_weights_{iteration}.pt")
     if os.path.exists(lora_path):
-        lora_state_dict = accelerator.load(lora_path)
+        lora_state_dict = torch.load(lora_path, map_location=device)
         personalized_pipe.unet.load_state_dict(lora_state_dict, strict=False)
         print(f"LoRA weights loaded from iteration {iteration}")
     
     start_iteration = iteration + 1
     print(f"Resumed from checkpoint at iteration {start_iteration - 1}")
     return start_iteration
+
+
+def check_lora_application(model):
+    lora_modules = [module for name, module in model.named_modules() if 'lora_' in name]
+    if lora_modules:
+        print(f"Found {len(lora_modules)} LoRA modules in the model.")
+        for module in lora_modules[:5]:  # Print details of first 5 LoRA modules
+            print(f"✅ LoRA module: {module}")
+    else:
+        print("❌ No LoRA modules found in the model.")
+
+# Call this function before starting the training loop
+check_lora_application(personalized_pipe.unet)
 
 def save_icomp_image(Icomp, iteration):
     output_image = Icomp.detach().cpu().squeeze().permute(1, 2, 0).numpy()
@@ -177,10 +194,39 @@ for iteration in range(start_iteration, config.num_iterations):
 
         # Compute visibility mask        
         V = compute_visibility_mask(renderer, scene_mesh, plane_mesh)
-              
+        
+
+        # Print shapes for debugging
+        print(f"V shape: {V.shape}")
+        print(f"beta_shadow_tone shape: {beta_shadow_tone.shape}")
+        print(f"Ibg shape: {Ibg.shape}")
+        print(f"Ifg_tone shape: {Ifg_tone.shape}")
+
+        # Ensure all tensors have the same number of dimensions
+        V = V.unsqueeze(1) if V.dim() == 3 else V
+
+        
+        beta_shadow_tone = beta_shadow_tone.unsqueeze(1) if beta_shadow_tone.dim() == 3 else beta_shadow_tone
+        Ibg = Ibg.unsqueeze(0) if Ibg.dim() == 3 else Ibg
+        Ifg_tone = Ifg_tone.unsqueeze(0) if Ifg_tone.dim() == 3 else Ifg_tone
+
+        # Ensure all tensors have the same spatial dimensions
+        target_size = (Ibg.shape[2], Ibg.shape[3])
+        V = F.interpolate(V, size=target_size, mode='nearest')
+        beta_shadow_tone = F.interpolate(beta_shadow_tone, size=target_size, mode='bilinear', align_corners=False)
+        Ifg_tone = F.interpolate(Ifg_tone, size=target_size, mode='bilinear', align_corners=False)
+
+
+
+       
         # Composite  
         Icomp = (1 - V) * beta_shadow_tone * Ibg + V * Ifg_tone
+        Icomp = Icomp.to(device)
+        pipe.unet = pipe.unet.to(device)
+        pipe.vae = pipe.vae.to(device)
+        pipe.text_encoder = pipe.text_encoder.to(device)
 
+        print(f"Icomp shape: {Icomp.shape}")
         # Compute LDS loss
         prompt = "A photo of a car in a realistic scene"
         t = torch.randint(0, pipe.scheduler.num_train_timesteps, (1,), device=device)
@@ -202,9 +248,10 @@ for iteration in range(start_iteration, config.num_iterations):
     
     if iteration % 50 == 0:
         print(f"Iteration {iteration} Loss: {loss.item()}")
-        save_checkpoint(iteration)
+        save_checkpoint(iteration, env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow, optimizer, personalized_pipe)
+
         save_icomp_image(Icomp, iteration)
 
 # Save final results
 save_icomp_image(Icomp, config.num_iterations - 1)
-save_checkpoint(config.num_iterations - 1)
+save_checkpoint(config.num_iterations - 1, env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow, optimizer, personalized_pipe)
