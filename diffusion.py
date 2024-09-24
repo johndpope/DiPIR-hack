@@ -2,9 +2,10 @@ import torch
 import torch.nn.functional as F
 from diffusers import StableDiffusionPipeline, DDPMScheduler
 from lora_utils import inject_trainable_LoRA, fuse_LoRA_into_linear, unfreeze_all_LoRA_layers, ATTENTION_MODULES
+from utils import generate_concept_images
+from PIL import Image
 
-
-def personalize_diffusion_model(config, device):
+def personalize_diffusion_model(config, bg_transform,device):
     # Load the pre-trained Stable Diffusion model
     pipe = StableDiffusionPipeline.from_pretrained(
         config.diffusion_model_path,
@@ -45,7 +46,7 @@ def personalize_diffusion_model(config, device):
     fine_tuning_images = torch.cat([target_image, concept_images], dim=0)
 
     # Define the fine-tuning prompts
-    prompts = [config.scene_style_token] * 1 + [config.concept_class_prompt] * config.num_concept_images
+    prompts = [config.scene_style_token] * 1 + [config.concept_image_prompt] * config.num_concept_images
 
     # Prepare the optimizer
     optimizer = torch.optim.Adam(

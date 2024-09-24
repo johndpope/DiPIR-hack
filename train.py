@@ -78,7 +78,7 @@ pipe,env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow, optim
     pipe,env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow, optimizer
 )
 concept_images = generate_concept_images(pipe, config.num_concept_images, config.concept_image_prompt).to(device)
-personalized_pipe = personalize_diffusion_model(config,  device)
+personalized_pipe = personalize_diffusion_model(config, bg_transform, device)
 
 # Personalize the diffusion model (assuming this has been done)
 # personalized_pipe = personalize_diffusion_model(pipe, Ibg, concept_images,1000,device)

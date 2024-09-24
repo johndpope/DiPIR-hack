@@ -21,6 +21,8 @@ num_bins: 5
 # Optimization settings
 num_iterations: 500
 learning_rate: 1e-2
+fine_tuning_learning_rate: 1e-4
+num_fine_tuning_epochs: 100
 lambda_consistency: 0.03
 lambda_reg: 0.01
 
@@ -37,6 +39,7 @@ lora_scale: 1.0
 # Training settings
 num_concept_images: 5
 concept_image_prompt: 'a photo of a car'
+scene_style_token: 'a scene in the style of sks rendering'
 personalization_steps: 1000
 
 # Rendering settings
