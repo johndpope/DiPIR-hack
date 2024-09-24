@@ -13,7 +13,7 @@ from peft import get_peft_model_state_dict
 from models import EnvironmentLight, ToneMapping
 from utils import load_virtual_object_from_blend, create_plane, generate_concept_images
 from rendering import setup_renderer, compute_visibility_mask
-# from diffusion import personalize_diffusion_model, lds_loss
+from diffusion import personalize_diffusion_model, lds_loss
 from loss import consistency_loss, regularization_loss, fuse_environment_maps
 from diffusers import StableDiffusionPipeline,DDPMScheduler
 from transformers import CLIPTextModel, CLIPTokenizer
@@ -25,48 +25,7 @@ import torch.nn.functional as F
 from diffusers import StableDiffusionPipeline, DDPMScheduler
 from lora_utils import inject_trainable_LoRA, fuse_LoRA_into_linear, unfreeze_all_LoRA_layers, ATTENTION_MODULES
 
-from pytorch3d.renderer import (
-      DirectionalLights
-
-)
-def personalize_diffusion_model(config, device):
-    pipe = StableDiffusionPipeline.from_pretrained(
-        config.diffusion_model_path,
-        safety_checker=None,
-        requires_safety_checker=False
-    ).to(device)
-    pipe.enable_attention_slicing()
-    
-    inject_trainable_LoRA(
-        model=pipe.unet,
-        rank=config.lora_rank,
-        scale=config.lora_scale,
-        target_replace_modules=ATTENTION_MODULES
-    )
-    
-    unfreeze_all_LoRA_layers(pipe.unet)
-    
-    for name, param in pipe.unet.named_parameters():
-        if 'lora' not in name:
-            param.requires_grad_(False)
-    
-    return pipe
-
-
-
-def lds_loss(pipe, personalized_pipe, image, prompt, t):
-    with torch.no_grad():
-        latents = pipe.vae.encode(image).latent_dist.sample() * 0.18215
-        noise = torch.randn_like(latents)
-        noisy_latents = pipe.scheduler.add_noise(latents, noise, t)
-    
-    text_embeddings = pipe.text_encoder(prompt)[0]
-    
-    noise_pred = personalized_pipe.unet(noisy_latents, t, encoder_hidden_states=text_embeddings).sample
-    noise_pred_original = pipe.unet(noisy_latents, t, encoder_hidden_states=text_embeddings).sample
-    
-    return F.mse_loss(noise_pred - noise_pred_original, noise)
-
+from pytorch3d.renderer import DirectionalLights
 
 # Load configuration
 config = OmegaConf.load('config.yaml')
@@ -97,8 +56,8 @@ renderer = setup_renderer(config, device)
 # Initialize environment lights and tone mapping
 env_light_fg = EnvironmentLight(config.num_lobes, device)
 env_light_shadow = EnvironmentLight(config.num_lobes, device)
-tone_mapping_fg = ToneMapping(config.num_bins)
-tone_mapping_shadow = ToneMapping(config.num_bins)
+tone_mapping_fg = ToneMapping(num_bins=config.num_bins, device=device)
+tone_mapping_shadow = ToneMapping(num_bins=config.num_bins, device=device)
 
 # Setup optimizer
 params = (list(env_light_fg.parameters()) + list(env_light_shadow.parameters()) +
@@ -119,10 +78,10 @@ pipe,env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow, optim
     pipe,env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow, optimizer
 )
 concept_images = generate_concept_images(pipe, config.num_concept_images, config.concept_image_prompt).to(device)
-# personalized_pipe = personalize_diffusion_model(config,  device)
+personalized_pipe = personalize_diffusion_model(config,  device)
 
 # Personalize the diffusion model (assuming this has been done)
-personalized_pipe = personalize_diffusion_model(pipe, Ibg, concept_images,1000,device)
+# personalized_pipe = personalize_diffusion_model(pipe, Ibg, concept_images,1000,device)
 
 # Create directories
 os.makedirs(config.checkpoint_dir, exist_ok=True)
