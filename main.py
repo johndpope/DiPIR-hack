@@ -15,6 +15,7 @@ from diffusers import UNet2DConditionModel
 from lora_utils import inject_trainable_LoRA, fuse_LoRA_into_linear, unfreeze_all_LoRA_layers, ATTENTION_MODULES
 import os
 from accelerate import Accelerator
+from peft import get_peft_model_state_dict
 
 # PyTorch3D for differentiable rendering
 from pytorch3d.io import load_objs_as_meshes
@@ -512,11 +513,13 @@ env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow = accelerat
 optimizer = accelerator.prepare(optimizer)
 
 
-# Define the checkpoint directory and image output directory
+# Define the checkpoint directory, image output directory, and LoRA weights directory
 checkpoint_dir = "./checkpoints"
 image_output_dir = "./output_images"
+lora_weights_dir = "./lora_weights"
 os.makedirs(checkpoint_dir, exist_ok=True)
 os.makedirs(image_output_dir, exist_ok=True)
+os.makedirs(lora_weights_dir, exist_ok=True)
 
 # Function to save checkpoint
 def save_checkpoint(iteration):
@@ -530,8 +533,18 @@ def save_checkpoint(iteration):
         "iteration": iteration
     }, checkpoint_path)
     print(f"Checkpoint saved at iteration {iteration}")
+    
+    # Save LoRA weights
+    save_lora_weights(iteration)
 
-# Function to load checkpoint
+# Function to save LoRA weights
+def save_lora_weights(iteration):
+    lora_state_dict = get_peft_model_state_dict(personalized_pipe.unet)
+    lora_path = os.path.join(lora_weights_dir, f"lora_weights_{iteration}.pt")
+    accelerator.save(lora_state_dict, lora_path)
+    print(f"LoRA weights saved at iteration {iteration}")
+
+# Function to load checkpoint (update to load LoRA weights as well)
 def load_checkpoint():
     checkpoints = [f for f in os.listdir(checkpoint_dir) if f.startswith("checkpoint_") and f.endswith(".pt")]
     if not checkpoints:
@@ -547,7 +560,15 @@ def load_checkpoint():
     tone_mapping_shadow.load_state_dict(loaded_state["tone_mapping_shadow"])
     optimizer.load_state_dict(loaded_state["optimizer"])
     
-    start_iteration = loaded_state["iteration"] + 1
+    # Load LoRA weights
+    iteration = loaded_state["iteration"]
+    lora_path = os.path.join(lora_weights_dir, f"lora_weights_{iteration}.pt")
+    if os.path.exists(lora_path):
+        lora_state_dict = accelerator.load(lora_path)
+        personalized_pipe.unet.load_state_dict(lora_state_dict, strict=False)
+        print(f"LoRA weights loaded from iteration {iteration}")
+    
+    start_iteration = iteration + 1
     print(f"Resumed from checkpoint at iteration {start_iteration - 1}")
     return start_iteration
 
@@ -626,7 +647,7 @@ for iteration in range(start_iteration, num_iterations):
         Image.fromarray(output_image).save(f'output_{iteration}.png')
 
   # Save Icomp image every 100 iterations
-    if iteration % 100 == 0:
+    if iteration % 1 == 0:
         save_icomp_image(Icomp, iteration)
         
 # Save the final composite image
