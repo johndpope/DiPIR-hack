@@ -28,19 +28,25 @@ class EnvironmentLight(nn.Module):
 
 
 class ToneMapping(nn.Module):
-    def __init__(self, num_bins=5):
+    def __init__(self, num_bins=5, device='cpu'):
         super(ToneMapping, self).__init__()
         self.num_bins = num_bins
-        self.widths = nn.Parameter(torch.ones(num_bins) / num_bins)
-        self.heights = nn.Parameter(torch.linspace(0, 1, num_bins + 1))
-        self.slopes = nn.Parameter(torch.ones(num_bins + 1))
+        self.widths = nn.Parameter(torch.ones(num_bins, device=device) / num_bins)
+        self.heights = nn.Parameter(torch.linspace(0, 1, num_bins + 1, device=device))
+        self.slopes = nn.Parameter(torch.ones(num_bins + 1, device=device))
 
     def forward(self, x):
         x = torch.clamp(x, 0, 1)
-        bin_idx = torch.searchsorted(torch.cumsum(self.widths, 0), x)
+        device = x.device  # Get the device of input tensor x
+
+        bin_edges = torch.cumsum(self.widths, 0)
+        bin_idx = torch.searchsorted(bin_edges, x)
         bin_idx = torch.clamp(bin_idx, 0, self.num_bins - 1)
         
-        x_low = torch.gather(torch.cat([torch.zeros(1), torch.cumsum(self.widths, 0)[:-1]]), 0, bin_idx)
+        widths_cumsum = torch.cat([torch.zeros(1, device=device), bin_edges[:-1]], dim=0)
+        x_low = torch.gather(widths_cumsum, 0, bin_idx)
+        
+        # Proceed with the rest of the computation, ensuring all tensors are on the same device
         x_high = x_low + torch.gather(self.widths, 0, bin_idx)
         y_low = torch.gather(self.heights[:-1], 0, bin_idx)
         y_high = torch.gather(self.heights[1:], 0, bin_idx)
@@ -48,5 +54,7 @@ class ToneMapping(nn.Module):
         slope_high = torch.gather(self.slopes[1:], 0, bin_idx)
         
         t = (x - x_low) / (x_high - x_low)
-        y = y_low + (y_high - y_low) * (slope_low * t ** 2 + 2 * t * (1 - t)) / ((slope_low + slope_high) * t ** 2 + 2 * (slope_low + slope_high - 2) * t + 2)
+        numerator = slope_low * t ** 2 + 2 * t * (1 - t)
+        denominator = (slope_low + slope_high) * t ** 2 + 2 * (slope_low + slope_high - 2) * t + 2
+        y = y_low + (y_high - y_low) * numerator / denominator
         return y

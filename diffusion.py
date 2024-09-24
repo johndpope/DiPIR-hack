@@ -4,92 +4,90 @@ from diffusers import StableDiffusionPipeline, DDPMScheduler
 from lora_utils import inject_trainable_LoRA, fuse_LoRA_into_linear, unfreeze_all_LoRA_layers, ATTENTION_MODULES
 
 
-def personalize_diffusion_model(pipe, target_image, concept_images, num_steps=1000, device=None):
-    # Move the entire pipeline to the specified device
-    if device is None:
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    pipe = pipe.to(device)
-    target_image = target_image.to(device)
-    concept_images = concept_images.to(device)
-    
-    # Inject LoRA into the UNet
+def personalize_diffusion_model(config, device):
+    # Load the pre-trained Stable Diffusion model
+    pipe = StableDiffusionPipeline.from_pretrained(
+        config.diffusion_model_path,
+        safety_checker=None,
+        requires_safety_checker=False,
+    ).to(device)
+    pipe.enable_attention_slicing()
+
+    # Inject trainable LoRA modules into the model
     inject_trainable_LoRA(
         model=pipe.unet,
-        rank=4,
-        scale=1.0,
+        rank=config.lora_rank,
+        scale=config.lora_scale,
         target_replace_modules=ATTENTION_MODULES
     )
-    
-    # Unfreeze LoRA layers
+
+    # Unfreeze LoRA parameters for fine-tuning
     unfreeze_all_LoRA_layers(pipe.unet)
-    
-    # Freeze other parameters
+
+    # Freeze all other parameters
     for name, param in pipe.unet.named_parameters():
         if 'lora' not in name:
             param.requires_grad_(False)
 
-    # Prepare optimizer (only optimize LoRA parameters)
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, pipe.unet.parameters()), lr=1e-4)
+    # Prepare the fine-tuning dataset
+    # Generate synthetic images for concept preservation
+    concept_images = generate_concept_images(
+        pipe,
+        num_images=config.num_concept_images,
+        prompt=config.concept_image_prompt
+    ).to(device)
 
-    # Prepare noise scheduler
-    noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+    # Include the target scene image
+    target_image = Image.open(config.background_image_path).convert('RGB')
+    target_image = bg_transform(target_image).unsqueeze(0).to(device)
 
-    # Training loop
-    for step in range(num_steps):
-        # Randomly select an image and its corresponding prompt
-        idx = torch.randint(0, len(concept_images), (1,)).item()
-        image = concept_images[idx:idx+1].to(device)
-        prompt = "a photo of a car"
+    # Combine images into a dataset
+    fine_tuning_images = torch.cat([target_image, concept_images], dim=0)
 
-        # Encode the prompt
-        text_input = pipe.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=pipe.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt"
-        ).to(device)
-        encoder_hidden_states = pipe.text_encoder(text_input.input_ids)[0]
+    # Define the fine-tuning prompts
+    prompts = [config.scene_style_token] * 1 + [config.concept_class_prompt] * config.num_concept_images
 
-        # Prepare the image
-        image = image.to(device=pipe.device, dtype=pipe.unet.dtype)
+    # Prepare the optimizer
+    optimizer = torch.optim.Adam(
+        [p for p in pipe.unet.parameters() if p.requires_grad],
+        lr=config.fine_tuning_learning_rate
+    )
 
-        # Encode the image into latent space
-        latents = pipe.vae.encode(image).latent_dist.sample()
-        latents = latents * 0.18215
-
-        # Sample noise to add to the latents
-        noise = torch.randn_like(latents)
-        batch_size = latents.shape[0]
-
-        # Sample a random timestep for each image
-        timesteps = torch.randint(
-            0, noise_scheduler.config.num_train_timesteps, (batch_size,), device=latents.device
-        ).long()
-
-        # Add noise to the latents according to the noise magnitude at each timestep
-        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-
-        # Predict the noise residual
-        noise_pred = pipe.unet(noisy_latents, timesteps, encoder_hidden_states).sample
-
-        # Compute loss
-        loss = F.mse_loss(noise_pred, noise)
-
-        # Backpropagate and optimize
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-
-        # Log progress
-        if step % 100 == 0:
-            print(f"Step {step}/{num_steps}, Loss: {loss.item():.4f}")
-
-    # After training, fuse LoRA weights into the main model
-    fuse_LoRA_into_linear(pipe.unet, target_replace_modules=ATTENTION_MODULES)
+    # Fine-tune the model
+    pipe.unet.train()
+    num_epochs = config.num_fine_tuning_epochs
+    for epoch in range(num_epochs):
+        for img, prompt in zip(fine_tuning_images, prompts):
+            img = img.unsqueeze(0)  # Add batch dimension
+            # Encode the image
+            latents = pipe.vae.encode(img).latent_dist.sample() * pipe.vae.config.scaling_factor
+            noise = torch.randn_like(latents)
+            timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (1,), device=device).long()
+            noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
+            # Get text embeddings
+            text_input = pipe.tokenizer(
+                prompt,
+                padding="max_length",
+                max_length=pipe.tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt"
+            ).to(device)
+            text_embeddings = pipe.text_encoder(text_input.input_ids)[0]
+            # Predict the noise residual
+            noise_pred = pipe.unet(
+                noisy_latents,
+                timesteps,
+                encoder_hidden_states=text_embeddings
+            ).sample
+            # Compute the loss
+            loss = F.mse_loss(noise_pred, noise)
+            # Backpropagate
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
     return pipe
+
 
 def lds_loss(pipe, personalized_pipe, image, prompt, t):
     with torch.no_grad():

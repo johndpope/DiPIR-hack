@@ -119,7 +119,10 @@ pipe,env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow, optim
     pipe,env_light_fg, env_light_shadow, tone_mapping_fg, tone_mapping_shadow, optimizer
 )
 concept_images = generate_concept_images(pipe, config.num_concept_images, config.concept_image_prompt).to(device)
-personalized_pipe = personalize_diffusion_model(config,  device)
+# personalized_pipe = personalize_diffusion_model(config,  device)
+
+# Personalize the diffusion model (assuming this has been done)
+personalized_pipe = personalize_diffusion_model(pipe, Ibg, concept_images,1000,device)
 
 # Create directories
 os.makedirs(config.checkpoint_dir, exist_ok=True)
@@ -198,7 +201,7 @@ for iteration in range(start_iteration, config.num_iterations):
 
         # Render foreground        
         Ifg = renderer(scene_mesh, lights=fg_lights)
-        Ifg = Ifg[..., :3].permute(0, 3, 1, 2)
+        Ifg = Ifg[..., :3].permute(0, 3, 1, 2).to(device)
 
         # Render shadow        
         shadow_render = renderer(plane_mesh, lights=shadow_lights)
