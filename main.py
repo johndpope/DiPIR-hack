@@ -172,6 +172,10 @@ class EnvironmentLight(nn.Module):
         gaussian = torch.exp(-2 * (1 - dot_product) / (self.sigma ** 2).unsqueeze(0))
         return torch.matmul(gaussian, self.c)
 
+    def get_light_directions(self):
+        return F.normalize(self.mu, dim=-1)
+    
+
 env_light = EnvironmentLight(device=device)
 
 # --------------------------
@@ -210,16 +214,18 @@ tone_mapping = ToneMapping()
 cameras = FoVPerspectiveCameras(device=device)
 
 # Define rasterization settings
+# Set up renderer
 raster_settings = RasterizationSettings(
     image_size=512,
     blur_radius=0.0,
     faces_per_pixel=1,
 )
 
+cameras = FoVPerspectiveCameras(device=device)
+
 # Define blend parameters
 blend_params = BlendParams(sigma=1e-4, gamma=1e-4)
 
-# Create the renderer
 renderer = MeshRenderer(
     rasterizer=MeshRasterizer(
         cameras=cameras,
@@ -228,11 +234,14 @@ renderer = MeshRenderer(
     shader=SoftPhongShader(
         device=device,
         cameras=cameras,
-        lights=None,  # We'll set lights dynamically
+        lights=DirectionalLights(device=device),
         materials=Materials(device=device),
         blend_params=blend_params
     )
 )
+
+
+
 
 # --------------------------
 # Step 7: Load and Personalize Diffusion Model with LoRA
@@ -388,7 +397,7 @@ def lds_loss(pipe, personalized_pipe, image, prompt, t):
     return F.mse_loss(noise_pred - noise_pred_original, noise)
 
 
-def generate_concept_images(pipe, num_images=40, prompt="a photo of a car"):
+def generate_concept_images(pipe, num_images=5, prompt="a photo of a car"):
     concept_images = []
     for _ in range(num_images):
         attributes = ["red", "blue", "black", "white", "SUV", "sedan", "sports car"]
@@ -396,7 +405,7 @@ def generate_concept_images(pipe, num_images=40, prompt="a photo of a car"):
         full_prompt = f"{prompt}, {random_attribute}"
         
         with torch.no_grad():
-            image = pipe(full_prompt, num_inference_steps=50).images[0]
+            image = pipe(full_prompt, num_inference_steps=5).images[0]
         
         image = T.ToTensor()(image).unsqueeze(0)
         concept_images.append(image)
@@ -488,7 +497,8 @@ def compute_visibility_mask(renderer, scene_mesh, background_mesh):
     # Create visibility mask
     V = (scene_depth.zbuf < bg_depth.zbuf).float()
     
-    return V    
+    return V   
+ 
 num_iterations = 500
 for iteration in range(num_iterations):
     optimizer.zero_grad()
